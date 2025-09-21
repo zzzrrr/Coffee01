@@ -59,11 +59,11 @@
   <script>
     // ====== 設定區 ======
     const READ_API_KEY = "2PT0U0D31H9Q312Q";         // 提供的 Read API Key
+    const CHANNEL_ID = 1351240;                       // 你的 ThingSpeak Channel ID
     const TALKBACK_ID = "55279";                      // 提供的 TalkBack ID
     const TALKBACK_API_KEY = "ENW5KUIMAN9WSYE4";      // 提供的 TalkBack API Key
     const RESULTS = 100;                               // 過去 100 筆
 
-    // 欲顯示的欄位與標籤（依序 1~8）。如果 ThingSpeak 的 channel 有自訂欄位名稱，會在載入後覆蓋。
     const desiredLabels = [
       "溫度 (°C)",
       "濕度 (%RH)",
@@ -75,7 +75,6 @@
       "鉀肥 (ppm)"
     ];
 
-    // ====== 工具函式 ======
     const el = sel => document.querySelector(sel);
     function toast(msg){
       const t = el('#toast'); t.textContent = msg; t.classList.add('show');
@@ -85,27 +84,14 @@
       try{ return new Date(iso).toLocaleString(); }catch(e){ return "-"; }
     }
 
-    // ====== 取得 Channel ID（透過 READ API Key） ======
-    async function resolveChannelId(){
-      const url = `https://api.thingspeak.com/channels.json?api_key=${READ_API_KEY}`;
-      const r = await fetch(url);
-      if(!r.ok) throw new Error('無法取得 Channel 列表');
-      const arr = await r.json();
-      if(!Array.isArray(arr) || arr.length===0) throw new Error('Read Key 未綁定任何 Channel');
-      // 預設取第一個 channel；若有多個，可改成讓使用者選擇
-      return arr[0]; // 直接回傳 channel 物件，含 id 與欄位名稱
-    }
-
-    // ====== 下載資料 ======
-    async function fetchFeeds(channel){
-      const url = `https://api.thingspeak.com/channels/${channel.id}/feeds.json?api_key=${READ_API_KEY}&results=${RESULTS}`;
+    async function fetchFeeds(){
+      const url = `https://api.thingspeak.com/channels/${CHANNEL_ID}/feeds.json?api_key=${READ_API_KEY}&results=${RESULTS}&_=${Date.now()}`;
       const r = await fetch(url);
       if(!r.ok) throw new Error('下載資料失敗');
       const json = await r.json();
-      return json; // { channel:{...}, feeds:[...] }
+      return json;
     }
 
-    // ====== 建立圖卡 ======
     function createCard(title, canvasId){
       const card = document.createElement('section');
       card.className = 'card';
@@ -113,20 +99,20 @@
       el('#grid').appendChild(card);
     }
 
-    // ====== 繪圖 ======
     function buildChart(canvasId, labels, values){
       const ctx = document.getElementById(canvasId);
       if(!ctx) return;
+
       return new Chart(ctx, {
         type: 'line',
         data: {
-          labels,
+          labels: labels,
           datasets: [{
             label: '',
             data: values,
-            tension: .25,
+            tension: 0.25,
             borderWidth: 2,
-            pointRadius: 0,
+            pointRadius: 3, // 小點顯示
             fill: false
           }]
         },
@@ -146,16 +132,14 @@
       });
     }
 
-    // ====== TalkBack ZERO ======
     async function sendZero(){
       try{
         el('#zeroBtn').disabled = true;
-        // ThingSpeak TalkBack 新增一筆指令：ZERO
         const url = `https://api.thingspeak.com/talkbacks/${TALKBACK_ID}/commands.json`;
         const params = new URLSearchParams({ api_key: TALKBACK_API_KEY, command_string: 'ZERO' });
         const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: params });
         if(!r.ok){ throw new Error('TalkBack 送出失敗'); }
-        const j = await r.json();
+        await r.json();
         toast('已送出 ZERO，等待裝置提取執行');
       }catch(err){
         console.error(err);
@@ -165,32 +149,26 @@
       }
     }
 
-    // ====== 主流程 ======
     let charts = [];
     async function load(){
       try{
-        const channel = await resolveChannelId();
-        el('#channelName').textContent = channel.name || `Channel #${channel.id}`;
-
-        // 下載 feeds
-        const data = await fetchFeeds(channel);
+        const data = await fetchFeeds();
         const feeds = data.feeds || [];
         if(feeds.length===0){ toast('尚無資料'); return; }
+        el('#channelName').textContent = data.channel.name || `Channel #${CHANNEL_ID}`;
         el('#lastUpdated').textContent = fmtTime(feeds[feeds.length-1].created_at);
 
-        // 時間標籤
-        const xLabels = feeds.map(f => new Date(f.created_at).toLocaleTimeString());
+        const xLabels = feeds.map((f, idx) => {
+          const t = new Date(f.created_at);
+          return isNaN(t) ? `#${idx+1}` : t.toLocaleTimeString();
+        });
 
-        // 動態決定欄位名稱（若 channel 有自訂 fieldX 名稱就覆蓋）
         const fieldNames = desiredLabels.slice();
         for(let i=1;i<=8;i++){
           const k = `field${i}`;
-          if(data.channel && data.channel[k]){
-            fieldNames[i-1] = data.channel[k];
-          }
+          if(data.channel && data.channel[k]) fieldNames[i-1] = data.channel[k];
         }
 
-        // 建立 8 張圖
         const grid = el('#grid'); grid.innerHTML = '';
         charts = [];
         for(let i=1;i<=8;i++){
@@ -199,16 +177,15 @@
           const canvasId = `c${i}`;
           createCard(title, canvasId);
 
-          const values = feeds.map(f => {
-            const v = f[fid];
-            return v===null||v===undefined? null : Number(v);
+          const arr = feeds.map(f => {
+            const v = Number(f[fid]);
+            return Number.isFinite(v) ? v : 0;
           });
 
-          // 目前值顯示
-          const latest = feeds[feeds.length-1][fid];
-          el(`#curr-${canvasId}`).textContent = (latest!==null && latest!==undefined) ? latest : '—';
+          const latestRaw = feeds[feeds.length-1][fid];
+          el(`#curr-${canvasId}`).textContent = (latestRaw!==null && latestRaw!==undefined && latestRaw!=='') ? latestRaw : '—';
 
-          const chart = buildChart(canvasId, xLabels, values);
+          const chart = buildChart(canvasId, xLabels, arr);
           charts.push(chart);
         }
       }catch(err){
@@ -217,19 +194,15 @@
       }
     }
 
-    // 自動刷新（每 30 秒）
     let timer = null;
     function startAuto(){
       if(timer) clearInterval(timer);
       timer = setInterval(()=>load(), 30000);
     }
 
-    // 綁定
     document.addEventListener('DOMContentLoaded', ()=>{
       el('#zeroBtn').addEventListener('click', sendZero);
       load();
       startAuto();
     });
   </script>
-</body>
-</html>
